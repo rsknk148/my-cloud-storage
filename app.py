@@ -165,6 +165,7 @@ def upload_file():
         return jsonify({'success': False, 'message': 'No selected file'})
     
     db = get_db()
+    uploaded_files = []
     for file in files:
         if file:
             filename = secure_filename(file.filename)
@@ -176,9 +177,18 @@ def upload_file():
                 INSERT INTO files (filename, user_id, path, size)
                 VALUES (?, ?, ?, ?)
             ''', (filename, current_user.id, file_path, os.path.getsize(file_path)))
+            
+            uploaded_files.append({
+                'filename': filename,
+                'size': os.path.getsize(file_path)
+            })
     
     db.commit()
-    return jsonify({'success': True, 'message': 'Files uploaded successfully'})
+    return jsonify({
+        'success': True, 
+        'message': 'Files uploaded successfully',
+        'files': uploaded_files
+    })
 
 @app.route('/download/<filename>')
 @login_required
@@ -214,6 +224,140 @@ def delete_file(filename):
     except Exception as e:
         flash(f'Error deleting file: {str(e)}')
     return redirect(url_for('index'))
+
+# API endpoints for mobile app
+@app.route('/api/login', methods=['POST'])
+def api_login():
+    data = request.get_json()
+    if not data:
+        return jsonify({'success': False, 'message': 'No data provided'}), 400
+    
+    username = data.get('username')
+    password = data.get('password')
+    
+    if not username or not password:
+        return jsonify({'success': False, 'message': 'Username and password required'}), 400
+    
+    db = get_db()
+    user = db.execute('SELECT * FROM users WHERE username = ?', (username,)).fetchone()
+    
+    if user and check_password_hash(user['password'], password):
+        user_obj = User(user['id'], user['username'], user['email'])
+        login_user(user_obj, remember=True)
+        session.permanent = True
+        return jsonify({
+            'success': True, 
+            'message': 'Login successful',
+            'user': {
+                'id': user['id'],
+                'username': user['username'],
+                'email': user['email']
+            }
+        })
+    
+    return jsonify({'success': False, 'message': 'Invalid username or password'}), 401
+
+@app.route('/api/register', methods=['POST'])
+def api_register():
+    data = request.get_json()
+    if not data:
+        return jsonify({'success': False, 'message': 'No data provided'}), 400
+    
+    username = data.get('username')
+    password = data.get('password')
+    email = data.get('email')
+    
+    if not username or not password or not email:
+        return jsonify({'success': False, 'message': 'Username, password, and email required'}), 400
+    
+    # Validate password
+    is_valid, message = validate_password(password)
+    if not is_valid:
+        return jsonify({'success': False, 'message': message}), 400
+    
+    try:
+        db = get_db()
+        db.execute('INSERT INTO users (username, password, email) VALUES (?, ?, ?)',
+                  (username, generate_password_hash(password), email))
+        db.commit()
+        return jsonify({'success': True, 'message': 'Registration successful'})
+    except sqlite3.IntegrityError:
+        return jsonify({'success': False, 'message': 'Username or email already exists'}), 409
+
+@app.route('/api/files', methods=['GET'])
+@login_required
+def api_get_files():
+    db = get_db()
+    files = db.execute('''
+        SELECT filename, size, uploaded_at as date
+        FROM files
+        WHERE user_id = ?
+        ORDER BY uploaded_at DESC
+    ''', (current_user.id,)).fetchall()
+    
+    files_list = []
+    for file in files:
+        files_list.append({
+            'filename': file['filename'],
+            'size': file['size'],
+            'date': file['date']
+        })
+    
+    return jsonify({'success': True, 'files': files_list})
+
+@app.route('/api/upload', methods=['POST'])
+@login_required
+def api_upload_file():
+    if 'file' not in request.files:
+        return jsonify({'success': False, 'message': 'No file part'}), 400
+    
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'success': False, 'message': 'No selected file'}), 400
+    
+    if file:
+        filename = secure_filename(file.filename)
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        file.save(file_path)
+        
+        # Save file info to database
+        db = get_db()
+        db.execute('''
+            INSERT INTO files (filename, user_id, path, size)
+            VALUES (?, ?, ?, ?)
+        ''', (filename, current_user.id, file_path, os.path.getsize(file_path)))
+        db.commit()
+        
+        return jsonify({
+            'success': True, 
+            'message': 'File uploaded successfully',
+            'file': {
+                'filename': filename,
+                'size': os.path.getsize(file_path)
+            }
+        })
+    
+    return jsonify({'success': False, 'message': 'Upload failed'}), 500
+
+@app.route('/api/delete/<filename>', methods=['DELETE'])
+@login_required
+def api_delete_file(filename):
+    try:
+        db = get_db()
+        file = db.execute('''
+            SELECT path FROM files
+            WHERE filename = ? AND user_id = ?
+        ''', (filename, current_user.id)).fetchone()
+        
+        if file:
+            os.remove(file['path'])
+            db.execute('DELETE FROM files WHERE filename = ? AND user_id = ?', (filename, current_user.id))
+            db.commit()
+            return jsonify({'success': True, 'message': 'File deleted successfully'})
+        else:
+            return jsonify({'success': False, 'message': 'File not found'}), 404
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'Error deleting file: {str(e)}'}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True) 
